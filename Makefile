@@ -9,7 +9,10 @@ BIN_OUT := $(BUILD)/bin
 
 # Don't use ?= with $(shell ...)
 ifndef CXX_FLAGS
-CXX_FLAGS := --std=gnu++17 -Wall -O3 -nostdinc -nostdlib -mkernel -DKERNEL -isystem $(shell xcrun --show-sdk-path)/System/Library/Frameworks/Kernel.framework/Headers -Wl,-kext -lcc_kext $(CXXFLAGS)
+CXX_FLAGS := --std=gnu++17 -Wall -O3 -nostdinc -nostdlib -mkernel \
+             -fno-use-cxa-atexit -fno-exceptions -fno-rtti \
+             -DKERNEL -isystem $(shell xcrun --show-sdk-path)/System/Library/Frameworks/Kernel.framework/Headers \
+             -Wl,-kext -lcc_kext $(CXXFLAGS)
 endif
 
 .PHONY: all clean lib build tests install

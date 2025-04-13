@@ -32,7 +32,7 @@ _arbitrary_call:
     // Load the function pointer into X16
     mov x16, x0
     xpaci x16
-    
+
     // Because this is a variadic function,
     // up to 10 arguments are placed onto
     // the stack, so we need to load them

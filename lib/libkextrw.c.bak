@@ -1,16 +1,26 @@
 #include "libkextrw.h"
-#include "utils.h"
 #include <IOKit/IOKitLib.h>
 #include <mach-o/loader.h>
 #include <mach/kern_return.h>
 #include <mach/mach.h>
 #include <stdio.h>
+#include <time.h>
 
 #define STATIC_KERNEL_BASE (0xFFFFFE0007004000)
 
 uint64_t gKernelBase = 0, gKernelSlide = 0;
 
+#include "utils.h"
+
 io_connect_t gClient = MACH_PORT_NULL;
+
+void log_prefix() {
+  // add time
+  time_t t = time(NULL);
+  struct tm tm = *localtime(&t);
+  printf("[%04d-%02d-%02d %02d:%02d:%02d] ", tm.tm_year + 1900, tm.tm_mon + 1,
+         tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
+}
 
 static inline io_connect_t kextrw_open(void) {
   io_service_t service = IOServiceGetMatchingService(
@@ -30,14 +40,23 @@ static inline io_connect_t kextrw_open(void) {
 
 static inline kern_return_t kextrw_kread(io_connect_t client, uint64_t from,
                                          void *to, uint64_t len) {
-  uint64_t in[] = {from, (uint64_t)to, len};
-  return IOConnectCallScalarMethod(client, 0, in, 3, NULL, NULL);
+  uint64_t scalarInput[2] = {from, len};
+  size_t structureOutputSize = len;
+  return IOConnectCallMethod(client, 0,                 // selector for kread
+                             scalarInput, 2,            // scalar inputs
+                             NULL, 0,                   // no struct input
+                             NULL, 0,                   // no scalar output
+                             to, &structureOutputSize); // struct output
 }
 
 static inline kern_return_t kextrw_kwrite(io_connect_t client, void *from,
                                           uint64_t to, uint64_t len) {
-  uint64_t in[] = {(uint64_t)from, to, len};
-  return IOConnectCallScalarMethod(client, 1, in, 3, NULL, NULL);
+  uint64_t scalarInput[2] = {to, len};
+  return IOConnectCallMethod(client, 1,      // selector for kwrite
+                             scalarInput, 2, // scalar inputs
+                             from, len,      // struct input
+                             NULL, 0,        // no scalar output
+                             NULL, NULL);    // no struct output
 }
 
 static inline kern_return_t kextrw_physread(io_connect_t client, uint64_t from,
@@ -273,100 +292,175 @@ void kfree(uint64_t addr, uint64_t size) { kextrw_kfree(gClient, addr, size); }
 /* Utilities */
 
 uint64_t get_kernel_base() {
-  uint64_t kernelPage = 0;
-  kern_return_t kr = kextrw_get_reset_vector(gClient, &kernelPage);
+  const bool debug = true; // Set to false to disable debug output
+  // const size_t CHUNK_SIZE = 0x10000000; // 256MB chunk size
+  const size_t CHUNK_SIZE = 0x100; // 256byte chunk size
 
-  if (kr != KERN_SUCCESS) {
-#ifdef KERNEL_BASE_DEBUG
-    printf("ERROR: Failed to get reset vector, error: %s (0x%x)\n",
-           get_error_name(kr), kr);
-#endif
+  // every large region print statement (every 1,048,575 iterations of
+  // 0x10000000 MB read)
+  const uint64_t MAX_FAILED_RANGE_SIZE =
+      CHUNK_SIZE * 3145727; // Threshold for reporting failed ranges (every
+                            // 1,048,575 iterations)
+
+  if (debug)
+    printf("[+] Searching for kernel base...\n");
+
+  uint64_t resetVector = 0;
+  kern_return_t kr = kextrw_get_reset_vector(gClient, &resetVector);
+
+  if (kr != KERN_SUCCESS || !resetVector) {
+    if (debug)
+      printf("[-] Failed to get reset vector\n");
     return 0;
   }
 
-  if (!kernelPage) {
-#ifdef KERNEL_BASE_DEBUG
-    printf("ERROR: Got null reset vector\n");
-#endif
-    return 0;
-  }
+  if (debug)
+    printf("[+] Reset vector at 0x%llx\n", resetVector);
 
-#ifdef KERNEL_BASE_DEBUG
-  printf("INFO: Reset vector at 0x%llx\n", kernelPage);
-#endif
+  // Align to page boundary
+  uint64_t startAddress = resetVector & ~(uint64_t)PAGE_MASK;
+  uint64_t kernelBase = 0;
+  uint64_t iterations = 0;
 
-  // Start scanning backward from kernelPage
-  uint64_t address = kernelPage & ~(uint64_t)0xFFF;
-  const uint64_t minAddress = 0xfffffe0000000000;
-  const size_t chunkSize = 0x1000;
-  uint8_t *buffer = malloc(chunkSize);
+  // Allocate buffer for chunk reading
+  unsigned char *buffer = malloc(CHUNK_SIZE);
   if (!buffer) {
-#ifdef KERNEL_BASE_DEBUG
-    printf("ERROR: Failed to allocate buffer\n");
-#endif
+    if (debug)
+      printf("[-] Failed to allocate memory for chunk buffer\n");
     return 0;
   }
 
-  while (address >= minAddress) {
-    size_t readSize = chunkSize;
-    if (address < minAddress + chunkSize) {
-      readSize = address - minAddress;
-      address = minAddress;
+  // Variables to track failed read ranges
+  uint64_t failedRangeStart = 0;
+  uint64_t failedRangeEnd = 0;
+
+  int lastReason = 0;
+
+  while (startAddress >
+         0xffff00000000000) { // Don't go below a reasonable address
+    if (debug && (iterations & 0xFFFFF) == 0) { // Report every 65536 iterations
+
+      printf("[*] Read a large chunk of memory at 0x%llx (%llu iterations). "
+             "0x%llx MB remaining\n",
+             startAddress, iterations, (startAddress / 0x100000));
     }
 
-    int ret = kreadbuf(address, buffer, readSize);
-    if (ret != KERN_SUCCESS) {
-#ifdef KERNEL_BASE_DEBUG
-      printf("ERROR: Failed to read memory at 0x%llx, error: %s (0x%x)\n",
-             address, get_error_name(ret), ret);
-#endif
+    // Read a large chunk of memory
+    uint64_t readSize = CHUNK_SIZE;
+    bool readFailed = false;
 
-      if (address >= chunkSize) {
-        address -= chunkSize;
-      } else {
-        break;
+    if (kreadbuf(startAddress - CHUNK_SIZE, buffer, readSize) != KERN_SUCCESS) {
+      // Try a smaller read if this fails
+      readSize = PAGE_SIZE * 16;
+      int err = kreadbuf(startAddress - readSize, buffer, readSize);
+      if (err != KERN_SUCCESS) {
+        // Mark this as a failed read
+        readFailed = true;
+        lastReason = err;
+
+        // Update failed read range
+        if (failedRangeStart == 0) {
+          // Starting a new failed range
+          failedRangeEnd = startAddress;
+          failedRangeStart = startAddress - readSize;
+        } else {
+          // Extend the failed range
+          failedRangeStart = startAddress - readSize;
+        }
+
+        // Check if failed range exceeds threshold
+        if ((failedRangeEnd - failedRangeStart) >= MAX_FAILED_RANGE_SIZE) {
+          if (debug) {
+            printf("[-] Failed to read memory range: 0x%llx - 0x%llx\n",
+                   failedRangeStart, failedRangeEnd);
+            printf("[-] Last error: %s (0x%llx)\n", get_error_name(lastReason),
+                   lastReason);
+          }
+          // Reset failed range tracking
+          failedRangeStart = 0;
+          failedRangeEnd = 0;
+        }
+
+        // Move to next chunk if read fails
+        startAddress -= readSize;
+        iterations++;
+        continue;
       }
-      continue;
+    } else {
+      // If we had a failed range and now read succeeds, report the failed range
+      if (failedRangeStart != 0) {
+        if (debug) {
+          printf("[-] Failed to read memory range: 0x%llx - 0x%llx\n",
+                 failedRangeStart, failedRangeEnd);
+          printf("[-] Last error: %s (0x%llx)\n", get_error_name(lastReason),
+                 lastReason);
+        }
+        // Reset failed range tracking
+        failedRangeStart = 0;
+        failedRangeEnd = 0;
+      }
     }
 
-    for (size_t offset = 0; offset < readSize - sizeof(struct mach_header_64);
-         offset += 4) {
-      uint32_t magic = *(uint32_t *)(buffer + offset);
-      if (magic == MH_MAGIC_64 || magic == MH_CIGAM_64) {
-        uint64_t potentialBase = address + offset;
-        // cast to mach_header_64
-        struct mach_header_64 *header =
-            (struct mach_header_64 *)(buffer + offset);
-        if (header->filetype == MH_EXECUTE) {
-#ifdef KERNEL_BASE_DEBUG
-          printf("INFO: Found kernel Mach-O header at 0x%llx\n", potentialBase);
-#endif
-          gKernelBase = potentialBase;
-          gKernelSlide = potentialBase - STATIC_KERNEL_BASE;
-          free(buffer);
-          return gKernelBase;
+    // Scan chunk for Mach-O header from end to beginning
+    for (int64_t offset = readSize - 4; offset >= 0; offset -= 4) {
+      uint32_t *magic = (uint32_t *)(buffer + offset);
+
+      if (*magic == MH_MAGIC_64 || *magic == MH_CIGAM_64) {
+        // Potential Mach-O header found
+        uint64_t headerAddr = startAddress - readSize + offset;
+
+        // Read file type directly from kernel memory to confirm
+        uint32_t fileType = kread32(headerAddr + 0xC);
+
+        if (debug) {
+          log_prefix();
+          printf(
+              "[*] Found Mach-O header at 0x%llx (magic: 0x%x, type: 0x%x)\n",
+              headerAddr, *magic, fileType);
+        }
+
+        if (fileType == MH_EXECUTE) {
+          // Found the kernel!
+          kernelBase = headerAddr;
+          if (debug)
+            printf("[+] Kernel base found!\n");
+          goto cleanup;
         }
       }
     }
 
-    if (address >= chunkSize) {
-      address -= chunkSize;
-    } else {
-      break;
+    // Move to next chunk
+    startAddress -= readSize;
+    iterations++;
+  }
+
+cleanup:
+
+  // If we exit the loop and have a failed range, report it
+  if (failedRangeStart != 0) {
+    if (debug) {
+      printf("[-] Failed to read memory range: 0x%llx - 0x%llx\n",
+             failedRangeStart, failedRangeEnd);
     }
   }
 
-#ifdef KERNEL_BASE_DEBUG
-  printf("ERROR: Failed to find kernel base\n");
-#endif
   free(buffer);
-  return 0;
 
-  return 0;
-}
+  if (kernelBase) {
+    gKernelBase = kernelBase;
+    gKernelSlide = kernelBase - STATIC_KERNEL_BASE;
 
-uint64_t get_reset_vector() {
-  uint64_t reset_vector = 0;
-  kextrw_get_reset_vector(gClient, &reset_vector);
-  return reset_vector;
+    printf("gKernelBase: 0x%llx\n", gKernelBase);
+    printf("staticKernelBase: 0x%llx\n", STATIC_KERNEL_BASE);
+    printf("gKernelSlide: 0x%llx\n", gKernelSlide);
+
+    if (debug) {
+      printf("[+] Kernel base: 0x%llx\n", kernelBase);
+      printf("[+] Kernel slide: 0x%llx\n", gKernelSlide);
+    }
+  } else if (debug) {
+    printf("[-] Failed to find kernel base\n");
+  }
+
+  return kernelBase;
 }

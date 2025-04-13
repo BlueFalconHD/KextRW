@@ -6,11 +6,11 @@
 OSDefineMetaClassAndFinalStructors(KextRW, IOService);
 
 bool KextRW::start(IOService *provider) {
-    if (!super::start(provider)) {
-        return false;
-    }
+  if (!super::start(provider)) {
+    return false;
+  }
 
-    registerService();
+  registerService();
 
-    return true;
+  return true;
 }

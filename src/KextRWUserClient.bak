@@ -4,8 +4,6 @@
 #include <IOKit/IOLib.h>
 #include <IOKit/IOMemoryDescriptor.h>
 #include <IOKit/IOReturn.h>
-#include <IOKit/IOService.h>
-#include <IOKit/IOSharedDataQueue.h>
 #include <IOKit/IOUserClient.h>
 #include <kern/task.h>
 #include <libkern/OSDebug.h>
@@ -73,124 +71,24 @@ IOReturn KextRWUserClient::externalMethod(uint32_t selector,
 
 IOReturn KextRWUserClient::kread(KextRWUserClient *client, void *reference,
                                  IOExternalMethodArguments *args) {
-  uint64_t kaddr = args->scalarInput[0]; // Kernel address to read from
-  user_addr_t uaddr =
-      args->scalarInput[1];          // User-space buffer to copy data into
-  size_t len = args->scalarInput[2]; // Length of data to read
+  // log read value and args
+  IOLog("KextRWUserClient::kread: addr %llx, len %llx\n", args->scalarInput[0],
+        args->scalarInput[2]);
 
-  if (!kaddr || !uaddr || !len)
-    return kIOReturnBadArgument;
-
-  // Create an IOMemoryDescriptor to map the kernel memory safely
-  IOMemoryDescriptor *memDesc = IOMemoryDescriptor::withAddressRange(
-      kaddr, len, kIODirectionIn, kernel_task);
-  if (!memDesc)
-    return kIOReturnNoMemory;
-
-  IOReturn ret = memDesc->prepare();
-  if (ret != kIOReturnSuccess) {
-    IOLog("KextRWUserClient::kread: Failed to prepare memory descriptor @ "
-          "0x%llx. Error code: %x\n",
-          kaddr, ret);
-    memDesc->release();
-    return ret;
-  }
-
-  // Allocate a buffer to read the data
-  void *buffer = IOMalloc(len);
-  if (!buffer) {
-    IOLog("KextRWUserClient::kread: Failed to allocate buffer of size %zu @ "
-          "0x%llx\n",
-          len, kaddr);
-    memDesc->complete();
-    memDesc->release();
-    return kIOReturnNoMemory;
-  }
-
-  // Read the data from the kernel memory
-  bzero(buffer, len);
-  UInt64 bytesRead = memDesc->readBytes(0, buffer, len);
-
-  if (bytesRead != len) {
-    IOLog("KextRWUserClient::kread: Failed to read %zu bytes from kernel "
-          "address 0x%llx. Only read 0x%llu bytes.\n",
-          len, kaddr, bytesRead);
-    IOFree(buffer, len);
-    memDesc->complete();
-    memDesc->release();
-    return kIOReturnVMError;
-  }
-
-  // Log the read data
-  IOLog("KextRWUserClient::kread: Read %zu bytes from kernel address "
-        "0x%llx\n",
-        len, kaddr);
-
-  // Copy data to user space
-  int error = copyout(buffer, uaddr, len);
-
-  if (error != 0) {
-    IOLog("KextRWUserClient::kread: Failed to copy data to user space. "
-          "Error code: %d\n",
-          error);
-  }
-
-  // Clean up
-  IOFree(buffer, len);
-  memDesc->complete();
-  memDesc->release();
-
-  return (error == 0) ? kIOReturnSuccess : kIOReturnVMError;
+  int r = copyout((const void *)args->scalarInput[0],
+                  (user_addr_t)args->scalarInput[1], args->scalarInput[2]);
+  return r == 0 ? kIOReturnSuccess : kIOReturnVMError;
 }
 
 IOReturn KextRWUserClient::kwrite(KextRWUserClient *client, void *reference,
                                   IOExternalMethodArguments *args) {
-  user_addr_t uaddr =
-      args->scalarInput[0];              // User-space buffer to read data from
-  uint64_t kaddr = args->scalarInput[1]; // Kernel address to write to
-  size_t len = args->scalarInput[2];     // Length of data to write
+  // log write value and args
+  IOLog("KextRWUserClient::kwrite: addr %llx, len %llx\n", args->scalarInput[0],
+        args->scalarInput[2]);
 
-  if (!kaddr || !uaddr || !len)
-    return kIOReturnBadArgument;
-
-  // Create an IOMemoryDescriptor to map the kernel memory safely
-  IOMemoryDescriptor *memDesc = IOMemoryDescriptor::withAddressRange(
-      kaddr, len, kIODirectionOutIn, kernel_task);
-  if (!memDesc)
-    return kIOReturnNoMemory;
-
-  IOReturn ret = memDesc->prepare();
-  if (ret != kIOReturnSuccess) {
-    memDesc->release();
-    return ret;
-  }
-
-  // Allocate a buffer to hold the data to be written
-  void *buffer = IOMalloc(len);
-  if (!buffer) {
-    memDesc->complete();
-    memDesc->release();
-    return kIOReturnNoMemory;
-  }
-
-  // Copy data from user space
-  int error = copyin(uaddr, buffer, len);
-  if (error != 0) {
-    IOFree(buffer, len);
-    memDesc->complete();
-    memDesc->release();
-    return kIOReturnVMError;
-  }
-
-  // Write the data to kernel memory
-  UInt64 bytesWritten = memDesc->writeBytes(0, buffer, len);
-
-  // Clean up
-  IOFree(buffer, len);
-  memDesc->complete();
-  memDesc->release();
-
-  return (bytesWritten == len) ? kIOReturnSuccess : kIOReturnVMError;
+  int r = copyin((user_addr_t)args->scalarInput[0],
+                 (void *)args->scalarInput[1], args->scalarInput[2]);
+  return r == 0 ? kIOReturnSuccess : kIOReturnVMError;
 }
 
 IOReturn physcopy(uint64_t src, uint64_t dst, uint64_t len, uint64_t alignment,

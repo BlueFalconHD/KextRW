@@ -4,24 +4,17 @@
 #include <mach/mach.h>
 #include <stdint.h>
 
+#define STATIC_KERNEL_BASE (0xFFFFFE0007004000)
+
 extern uint64_t gKernelBase, gKernelSlide;
 
 // gKernelSlide matches the kernel slide in a panic log,
 // but we need to use the KernelCache slide, which is
 // always 0x8000 less than the normal kernel slide.
 #define kslide(x) (x + gKernelSlide - 0x8000)
-#define kunslide(x) (x - gKernelSlide + 0x8000)
-
-#define K_TRY(x, m)                                                            \
-  do {                                                                         \
-    kern_return_t ret = (x);                                                   \
-    if (ret != KERN_SUCCESS) {                                                 \
-      printf("ERROR(%s): %s failed with error: %s (0x%x)\n", #m, #x,           \
-             get_error_name(ret), ret);                                        \
-      return ret;                                                              \
-    }                                                                          \
-    return KERN_SUCCESS;                                                       \
-  } while (0)
+#define kslidea(x) (x - STATIC_KERNEL_BASE + gKernelBase - 0x8000)
+#define kslideb(x) (x + gKernelBase + gKernelSlide - 0x8000)
+#define kslidec(x) (x + gKernelSlide)
 
 /* Initialisation and deinitialisation */
 int kextrw_init(void);
@@ -61,6 +54,7 @@ uint64_t kcall(uint64_t fn, uint64_t *args, uint32_t argsCnt);
 
 /* Translation */
 uint64_t kvtophys(uint64_t va);
+uint64_t phystokv(uint64_t pa);
 
 /* Allocations */
 uint64_t kalloc(uint64_t size);
@@ -68,6 +62,5 @@ void kfree(uint64_t addr, uint64_t size);
 
 /* Utilities */
 uint64_t get_kernel_base();
-uint64_t get_reset_vector();
 
 #endif // LIBKEXTRW_H
