@@ -5,12 +5,9 @@ LDFLAGS = -L../build/lib -lkextrw
 FRAMEWORKS = -framework IOKit -framework CoreFoundation
 BUILD_DIR = ../build
 
-CFLAGS += $(shell pkg-config --cflags capstone)
-LDFLAGS += $(shell pkg-config --libs capstone)
-
 all:
 	mkdir -p $(BUILD_DIR)/bin
-	$(CC) $(CFLAGS) kextrw_test.c utils.c -o $(BUILD_DIR)/bin/kextrw_test $(LDFLAGS) $(FRAMEWORKS)
+	$(CC) $(CFLAGS) kextrw_test.c -o $(BUILD_DIR)/bin/kextrw_test $(LDFLAGS) $(FRAMEWORKS)
 	ldid -Sentitlements.plist $(BUILD_DIR)/bin/kextrw_test
 
 clean:
