@@ -46,8 +46,9 @@ install: all
 	sudo cp -r $(TARGET).kext /Library/Extensions
 
 install_lib: lib
-	sudo cp -r $(LIB_OUT)/*.a /usr/local/lib/
-	sudo cp -r $(INCLUDE_DIR)/*.h /usr/local/include/
+	sudo mkdir -p /usr/local/lib/kextrw /usr/local/include/kextrw
+	sudo cp -r $(LIB_OUT)/*.a /usr/local/lib/kextrw/
+	sudo cp -r $(INCLUDE_DIR)/*.h /usr/local/include/kextrw/
 
 clean:
 	rm -rf $(TARGET).kext $(BUILD)
