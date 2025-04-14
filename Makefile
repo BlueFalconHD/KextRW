@@ -45,6 +45,10 @@ tests: build
 install: all
 	sudo cp -r $(TARGET).kext /Library/Extensions
 
+install_lib: lib
+	sudo cp -r $(LIB_OUT)/*.a /usr/local/lib/
+	sudo cp -r $(INCLUDE_DIR)/*.h /usr/local/include/
+
 clean:
 	rm -rf $(TARGET).kext $(BUILD)
 	$(MAKE) -C $(TESTS) clean
